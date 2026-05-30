@@ -684,7 +684,16 @@ export default function App() {
 
   useEffect(()=>{
     if (!user) { setProfile(null); return; }
-    supabase.from("profiles").select("*").eq("id",user.id).single().then(({data})=>setProfile(data));
+    supabase.from("profiles").select("*").eq("id", user.id).single()
+  .then(({data, error}) => {
+    if (data) { setProfile(data); }
+    else {
+      // פרופיל לא קיים — צור אוטומטית
+      supabase.from("profiles")
+        .insert({ id: user.id, email: user.email, role: "admin" })
+        .then(() => setProfile({ id: user.id, email: user.email, role: "admin" }));
+    }
+  });
   },[user]);
 
   const loadData = useCallback(async()=>{
