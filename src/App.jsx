@@ -24,7 +24,11 @@ async function triggerVapiCall(apiKey, assistantId, phoneNumber, customerName) {
   const res = await fetch("https://api.vapi.ai/call/phone", {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ assistantId, customer: { number: phoneNumber, name: customerName } })
+    body: JSON.stringify({
+      assistantId,
+      phoneNumberId: "c5fe4509-c826-42b8-a4f0-973a0b6d7c6a",  // ← הוסף כאן
+      customer: { number: phoneNumber, name: customerName },
+    })
   });
   if (!res.ok) throw new Error(`Vapi call failed: ${res.status}`);
   return res.json();
