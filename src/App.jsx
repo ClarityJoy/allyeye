@@ -20,17 +20,18 @@ async function fetchVapiCalls(apiKey, assistantId) {
   return res.json();
 }
 
-async function triggerVapiCall(apiKey, assistantId, phoneNumber, customerName) {
+async function triggerVapiCall(apiKey, assistantId, phoneNumberId, phoneNumber, customerName) {
+  const body = { assistantId, customer: { number: phoneNumber, name: customerName } };
+  if (phoneNumberId) body.phoneNumberId = phoneNumberId;
   const res = await fetch("https://api.vapi.ai/call/phone", {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      assistantId,
-      phoneNumberId: "c5fe4509-c826-42b8-a4f0-973a0b6d7c6a",  // ← הוסף כאן
-      customer: { number: phoneNumber, name: customerName },
-    })
+    body: JSON.stringify(body)
   });
-  if (!res.ok) throw new Error(`Vapi call failed: ${res.status}`);
+  if (!res.ok) {
+    const err = await res.json().catch(()=>({}));
+    throw new Error(`Vapi ${res.status}: ${err.message||JSON.stringify(err)}`);
+  }
   return res.json();
 }
 
@@ -250,7 +251,7 @@ function ManualCallEntry({ elderly, onSave, onClose }) {
 }
 
 // ─── ELDERLY FORM ─────────────────────────────────────────────────────────────
-function ElderlyForm({ initial, users, vapiKey, assistantId, onSave, onClose }) {
+function ElderlyForm({ initial, users, vapiKey, assistantId, phoneNumberId, onSave, onClose }) {
   const empty = { name:"", age:"", phone:"", call_time:"08:30", family_user_id:"", family_name:"", family_phone:"", active:true };
   const [form, setForm] = useState(initial ? {...initial, age:initial.age||""} : empty);
   const [calling, setCalling] = useState(false);
@@ -259,7 +260,7 @@ function ElderlyForm({ initial, users, vapiKey, assistantId, onSave, onClose }) 
   const testCall = async () => {
     if (!form.phone) { alert("הכנס מספר טלפון"); return; }
     setCalling(true);
-    try { await triggerVapiCall(vapiKey, assistantId, form.phone, form.name); alert(`✅ שיחה יצאה ל-${form.name}`); }
+    try { await triggerVapiCall(vapiKey, assistantId, phoneNumberId, form.phone, form.name); alert(`✅ שיחה יצאה ל-${form.name}`); }
     catch(e) { alert("שגיאה: "+e.message); }
     finally { setCalling(false); }
   };
@@ -303,7 +304,7 @@ function ElderlyForm({ initial, users, vapiKey, assistantId, onSave, onClose }) 
 }
 
 // ─── ADMIN DASHBOARD ──────────────────────────────────────────────────────────
-function AdminDashboard({ elderly, calls, users, vapiKey, assistantId, onRefresh }) {
+function AdminDashboard({ elderly, calls, users, vapiKey, assistantId, phoneNumberId, onRefresh }) {
   const [selectedCall, setSelectedCall] = useState(null);
   const [addingFor, setAddingFor] = useState(null);
   const [syncLoading, setSyncLoading] = useState(false);
@@ -429,7 +430,7 @@ function AdminDashboard({ elderly, calls, users, vapiKey, assistantId, onRefresh
 }
 
 // ─── ELDERLY MANAGEMENT ───────────────────────────────────────────────────────
-function ElderlyManagement({ elderly, users, vapiKey, assistantId, onRefresh }) {
+function ElderlyManagement({ elderly, users, vapiKey, assistantId, phoneNumberId, onRefresh }) {
   const [modal, setModal] = useState(null);
 
   const save = async (data) => {
@@ -468,7 +469,7 @@ function ElderlyManagement({ elderly, users, vapiKey, assistantId, onRefresh }) 
         </Card>
       ))}
       <Modal open={!!modal} onClose={()=>setModal(null)} title={modal==="add"?"הוסף קשיש/ה":`עריכת ${modal?.name}`}>
-        <ElderlyForm initial={modal==="add"?null:modal} users={users} vapiKey={vapiKey} assistantId={assistantId} onSave={save} onClose={()=>setModal(null)} />
+        <ElderlyForm initial={modal==="add"?null:modal} users={users} vapiKey={vapiKey} assistantId={assistantId} phoneNumberId={phoneNumberId} onSave={save} onClose={()=>setModal(null)} />
       </Modal>
     </div>
   );
@@ -604,24 +605,85 @@ function FamilyDashboard({ elderly, calls, onRefresh }) {
 
 // ─── USERS MANAGEMENT ─────────────────────────────────────────────────────────
 function UsersManagement({ users, onRefresh }) {
-  const setRole = async (id,role) => { await supabase.from("profiles").update({role}).eq("id",id); onRefresh(); };
+  const [email, setEmail] = useState("");
+  const [newRole, setNewRole] = useState("family");
+  const [tempPass, setTempPass] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState({ text:"", ok:true });
+
+  const createUser = async () => {
+    if (!email || !tempPass) { setMsg({ text:"נא למלא אימייל וסיסמה זמנית", ok:false }); return; }
+    setLoading(true); setMsg({ text:"", ok:true });
+    try {
+      // Create user via Supabase Admin API
+      const { data, error } = await supabase.auth.admin.createUser({
+        email, password: tempPass, email_confirm: true,
+      });
+      if (error) throw error;
+      // Set role in profiles (trigger may not fire instantly)
+      await new Promise(r => setTimeout(r, 800));
+      await supabase.from("profiles").upsert({ id: data.user.id, email, role: newRole });
+      setMsg({ text:`✅ משתמש ${email} נוצר בהצלחה`, ok:true });
+      setEmail(""); setTempPass("");
+      onRefresh();
+    } catch(e) {
+      // Fallback: insert profile manually if user already exists
+      const existing = users.find(u => u.email === email);
+      if (existing) {
+        setMsg({ text:"⚠ משתמש כבר קיים — עדכן תפקיד ישירות ברשימה", ok:false });
+      } else {
+        setMsg({ text:"שגיאה: " + (e.message||"נסה דרך Supabase Dashboard"), ok:false });
+      }
+    }
+    setLoading(false);
+  };
+
+  const setRole = async (id, role) => {
+    await supabase.from("profiles").update({ role }).eq("id", id);
+    onRefresh();
+  };
+
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
       <h2 style={{ margin:0, fontSize:20, fontWeight:800 }}>ניהול משתמשים</h2>
+
       <Card>
-        <div style={{ fontSize:13, color:"#374151", background:"#f8fafc", borderRadius:10, padding:14, lineHeight:1.8 }}>
-          💡 <strong>להוסיף משתמש:</strong><br/>
-          Supabase Dashboard → Authentication → Users → Invite User<br/>
-          אחרי שהמשתמש נרשם — שנה את התפקיד שלו כאן.
+        <div style={{ fontSize:15, fontWeight:700, marginBottom:16 }}>➕ הוסף משתמש חדש</div>
+        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+          <Input label="אימייל" type="email" value={email} onChange={setEmail} placeholder="family@example.com" />
+          <Input label="סיסמה זמנית" type="text" value={tempPass} onChange={setTempPass} placeholder="לפחות 6 תווים" />
+          <div>
+            <label style={{ fontSize:13, fontWeight:600, display:"block", marginBottom:6 }}>תפקיד</label>
+            <div style={{ display:"flex", gap:8 }}>
+              <Btn size="sm" variant={newRole==="family"?"primary":"ghost"} onClick={()=>setNewRole("family")}>👨‍👩‍👧 משפחה</Btn>
+              <Btn size="sm" variant={newRole==="admin"?"primary":"ghost"} onClick={()=>setNewRole("admin")}>🔑 אדמין</Btn>
+            </div>
+          </div>
+          {msg.text && (
+            <div style={{ background:msg.ok?"#dcfce7":"#fee2e2", color:msg.ok?"#166534":"#991b1b", borderRadius:8, padding:"10px 14px", fontSize:13 }}>
+              {msg.text}
+            </div>
+          )}
+          <Btn onClick={createUser} disabled={loading||!email||!tempPass}>
+            {loading ? "יוצר משתמש..." : "צור משתמש"}
+          </Btn>
+          <div style={{ fontSize:12, color:"#6b7280", background:"#f8fafc", borderRadius:8, padding:10, lineHeight:1.8 }}>
+            💡 הסיסמה הזמנית נשלחת למשתמש. הוא יכול לשנות אותה לאחר הכניסה הראשונה.
+            אם יש שגיאת הרשאות, השתמש ב: Supabase → Authentication → Users → Add User.
+          </div>
         </div>
       </Card>
+
       <Card>
-        <div style={{ fontSize:15, fontWeight:700, marginBottom:14 }}>משתמשים ({users.length})</div>
+        <div style={{ fontSize:15, fontWeight:700, marginBottom:14 }}>משתמשים קיימים ({users.length})</div>
+        {users.length === 0 && <div style={{ color:"#6b7280", fontSize:13 }}>אין משתמשים עדיין</div>}
         {users.map(u=>(
-          <div key={u.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderBottom:"1px solid #f1f5f9" }}>
+          <div key={u.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"12px 0", borderBottom:"1px solid #f1f5f9" }}>
             <div>
               <div style={{ fontWeight:600, fontSize:14 }}>{u.email}</div>
-              <div style={{ fontSize:12, color:"#6b7280" }}>{u.role==="admin"?"מנהל מערכת":"בן/בת משפחה"}</div>
+              <div style={{ fontSize:12, color: u.role==="admin"?"#1e40af":"#6b7280", marginTop:2 }}>
+                {u.role==="admin" ? "🔑 מנהל מערכת" : "👨‍👩‍👧 בן/בת משפחה"}
+              </div>
             </div>
             <div style={{ display:"flex", gap:8 }}>
               <Btn size="sm" variant={u.role==="admin"?"primary":"ghost"} onClick={()=>setRole(u.id,"admin")}>אדמין</Btn>
@@ -635,9 +697,10 @@ function UsersManagement({ users, onRefresh }) {
 }
 
 // ─── SETTINGS ─────────────────────────────────────────────────────────────────
-function SettingsView({ vapiKey, assistantId, onSave }) {
+function SettingsView({ vapiKey, assistantId, phoneNumberId, onSave }) {
   const [key, setKey] = useState(vapiKey||"");
   const [aId, setAId] = useState(assistantId||"");
+  const [pId, setPId] = useState(phoneNumberId||"");
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
       <h2 style={{ margin:0, fontSize:20, fontWeight:800 }}>הגדרות</h2>
@@ -646,10 +709,12 @@ function SettingsView({ vapiKey, assistantId, onSave }) {
         <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
           <Input label="Vapi Private API Key" value={key} onChange={setKey} placeholder="vapi_..." />
           <Input label="Assistant ID" value={aId} onChange={setAId} placeholder="מה-URL ב-Vapi Dashboard" />
-          <div style={{ background:"#eff6ff", borderRadius:10, padding:12, fontSize:13, color:"#1e40af" }}>
-            <strong>Assistant ID:</strong> app.vapi.ai/assistant/<strong>הID-כאן</strong>
+          <Input label="Phone Number ID" value={pId} onChange={setPId} placeholder="מ-Vapi → Phone Numbers" />
+          <div style={{ background:"#eff6ff", borderRadius:10, padding:12, fontSize:13, color:"#1e40af", lineHeight:1.8 }}>
+            <strong>איפה מוצאים Phone Number ID?</strong><br/>
+            Vapi Dashboard → Phone Numbers → לחץ על המספר → העתק את ה-ID מה-URL או מהכרטיסייה
           </div>
-          <Btn onClick={()=>onSave(key,aId)}>שמור הגדרות</Btn>
+          <Btn onClick={()=>onSave(key,aId,pId)}>שמור הגדרות</Btn>
         </div>
       </Card>
       <Card>
@@ -675,6 +740,7 @@ export default function App() {
   const [users, setUsers] = useState([]);
   const [vapiKey, setVapiKey] = useState(()=>localStorage.getItem("allyeye_vapiKey")||"");
   const [assistantId, setAssistantId] = useState(()=>localStorage.getItem("allyeye_assistantId")||"");
+  const [phoneNumberId, setPhoneNumberId] = useState(()=>localStorage.getItem("allyeye_phoneNumberId")||"");
   const [view, setView] = useState("dashboard");
   const [authLoading, setAuthLoading] = useState(true);
 
@@ -688,16 +754,7 @@ export default function App() {
 
   useEffect(()=>{
     if (!user) { setProfile(null); return; }
-    supabase.from("profiles").select("*").eq("id", user.id).single()
-  .then(({data, error}) => {
-    if (data) { setProfile(data); }
-    else {
-      // פרופיל לא קיים — צור אוטומטית
-      supabase.from("profiles")
-        .insert({ id: user.id, email: user.email, role: "admin" })
-        .then(() => setProfile({ id: user.id, email: user.email, role: "admin" }));
-    }
-  });
+    supabase.from("profiles").select("*").eq("id",user.id).single().then(({data})=>setProfile(data));
   },[user]);
 
   const loadData = useCallback(async()=>{
@@ -722,10 +779,11 @@ export default function App() {
 
   useEffect(()=>{ loadData(); },[loadData]);
 
-  const saveVapi = (key,aId) => {
-    setVapiKey(key); setAssistantId(aId);
+  const saveVapi = (key,aId,pId) => {
+    setVapiKey(key); setAssistantId(aId); setPhoneNumberId(pId||"");
     localStorage.setItem("allyeye_vapiKey",key);
     localStorage.setItem("allyeye_assistantId",aId);
+    localStorage.setItem("allyeye_phoneNumberId",pId||"");
     alert("הגדרות נשמרו ✓");
   };
 
@@ -771,11 +829,11 @@ export default function App() {
       <div style={{ maxWidth:920, margin:"0 auto", padding:"22px 12px" }}>
         {isAdmin?(
           <>
-            {view==="dashboard"&&<AdminDashboard elderly={elderly} calls={calls} users={users} vapiKey={vapiKey} assistantId={assistantId} onRefresh={loadData} />}
-            {view==="elderly"&&<ElderlyManagement elderly={elderly} users={users} vapiKey={vapiKey} assistantId={assistantId} onRefresh={loadData} />}
+            {view==="dashboard"&&<AdminDashboard elderly={elderly} calls={calls} users={users} vapiKey={vapiKey} assistantId={assistantId} phoneNumberId={phoneNumberId} onRefresh={loadData} />}
+            {view==="elderly"&&<ElderlyManagement elderly={elderly} users={users} vapiKey={vapiKey} assistantId={assistantId} phoneNumberId={phoneNumberId} onRefresh={loadData} />}
             {view==="reports"&&<CallHistory calls={calls} elderly={elderly} isAdmin={true} onRefresh={loadData} />}
             {view==="users"&&<UsersManagement users={users} onRefresh={loadData} />}
-            {view==="settings"&&<SettingsView vapiKey={vapiKey} assistantId={assistantId} onSave={saveVapi} />}
+            {view==="settings"&&<SettingsView vapiKey={vapiKey} assistantId={assistantId} phoneNumberId={phoneNumberId} onSave={saveVapi} />}
           </>
         ):(
           <>
