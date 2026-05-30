@@ -612,28 +612,19 @@ function UsersManagement({ users, onRefresh }) {
   const [msg, setMsg] = useState({ text:"", ok:true });
 
   const createUser = async () => {
-    if (!email || !tempPass) { setMsg({ text:"נא למלא אימייל וסיסמה זמנית", ok:false }); return; }
+    if (!email || !tempPass) { setMsg({ text:"נא למלא אימייל וסיסמה", ok:false }); return; }
+    if (tempPass.length < 6) { setMsg({ text:"סיסמה חייבת להיות לפחות 6 תווים", ok:false }); return; }
     setLoading(true); setMsg({ text:"", ok:true });
     try {
-      // Create user via Supabase Admin API
-      const { data, error } = await supabase.auth.admin.createUser({
-        email, password: tempPass, email_confirm: true,
+      const { data, error } = await supabase.functions.invoke("create-user", {
+        body: { email, password: tempPass, role: newRole }
       });
-      if (error) throw error;
-      // Set role in profiles (trigger may not fire instantly)
-      await new Promise(r => setTimeout(r, 800));
-      await supabase.from("profiles").upsert({ id: data.user.id, email, role: newRole });
-      setMsg({ text:`✅ משתמש ${email} נוצר בהצלחה`, ok:true });
-      setEmail(""); setTempPass("");
+      if (error || data?.error) throw new Error(error?.message || data?.error);
+      setMsg({ text:`✅ משתמש ${email} נוצר בהצלחה! תפקיד: ${newRole==="admin"?"אדמין":"משפחה"}`, ok:true });
+      setEmail(""); setTempPass(""); setNewRole("family");
       onRefresh();
     } catch(e) {
-      // Fallback: insert profile manually if user already exists
-      const existing = users.find(u => u.email === email);
-      if (existing) {
-        setMsg({ text:"⚠ משתמש כבר קיים — עדכן תפקיד ישירות ברשימה", ok:false });
-      } else {
-        setMsg({ text:"שגיאה: " + (e.message||"נסה דרך Supabase Dashboard"), ok:false });
-      }
+      setMsg({ text:"שגיאה: " + e.message, ok:false });
     }
     setLoading(false);
   };
@@ -653,7 +644,7 @@ function UsersManagement({ users, onRefresh }) {
           <Input label="אימייל" type="email" value={email} onChange={setEmail} placeholder="family@example.com" />
           <Input label="סיסמה זמנית" type="text" value={tempPass} onChange={setTempPass} placeholder="לפחות 6 תווים" />
           <div>
-            <label style={{ fontSize:13, fontWeight:600, display:"block", marginBottom:6 }}>תפקיד</label>
+            <label style={{ fontSize:13, fontWeight:600, display:"block", marginBottom:8 }}>תפקיד</label>
             <div style={{ display:"flex", gap:8 }}>
               <Btn size="sm" variant={newRole==="family"?"primary":"ghost"} onClick={()=>setNewRole("family")}>👨‍👩‍👧 משפחה</Btn>
               <Btn size="sm" variant={newRole==="admin"?"primary":"ghost"} onClick={()=>setNewRole("admin")}>🔑 אדמין</Btn>
@@ -667,10 +658,6 @@ function UsersManagement({ users, onRefresh }) {
           <Btn onClick={createUser} disabled={loading||!email||!tempPass}>
             {loading ? "יוצר משתמש..." : "צור משתמש"}
           </Btn>
-          <div style={{ fontSize:12, color:"#6b7280", background:"#f8fafc", borderRadius:8, padding:10, lineHeight:1.8 }}>
-            💡 הסיסמה הזמנית נשלחת למשתמש. הוא יכול לשנות אותה לאחר הכניסה הראשונה.
-            אם יש שגיאת הרשאות, השתמש ב: Supabase → Authentication → Users → Add User.
-          </div>
         </div>
       </Card>
 
